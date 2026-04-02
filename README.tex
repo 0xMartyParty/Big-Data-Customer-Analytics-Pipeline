@@ -1,6 +1,128 @@
-#readme for part 3
+# Big Data Banking Analytics Pipeline
 
-#if you follow the comments provided in the HiveDW
-#you will be able to execute all the commands and have the correct hdfs and hive setup
-#but first you will need to make an emr cluster with hadoop, hive, hbase, spark
-#also change the file path to where your.pem key is loacted
+## 📊 Overview
+This project builds an end-to-end big data architecture for analyzing customer spending behavior in a banking environment. The system integrates relational databases, data warehousing, NoSQL storage, and a front-end analytics interface.
+
+The goal is to enable scalable, fast, and flexible analysis of customer transactions for insights into spending patterns, customer segmentation, and decision-making.
+
+---
+
+## 🧠 Architecture Summary
+The system is designed using a modern data architecture with multiple layers:
+
+1. **Data Source & OLTP Layer (MySQL RDS)**
+2. **Data Warehouse Layer (Hive on AWS EMR)**
+3. **Speed Layer (DynamoDB NoSQL)**
+4. **Analytics Layer (Python)**
+5. **Front-End Interface**
+
+---
+
+## 🗄️ Data Engineering (Relational System)
+A synthetic banking database was constructed using real-world datasets:
+
+- ~54,000 customers
+- ~120,000 accounts
+- ~30,000 loans
+- ~280,000 transactions
+
+### Tables:
+- `customer`
+- `account`
+- `loan`
+- `transaction_table`
+
+The schema enforces:
+- Primary and foreign key relationships
+- Cleaned and standardized attributes
+- Referential integrity validation
+
+---
+
+## ⚡ NoSQL Speed Layer (DynamoDB)
+To support fast queries, a pre-aggregated table was built:
+
+- Table: `cust_aggregates`
+- Key: `(customer_id, month)`
+- Includes:
+  - Total monthly spending
+  - Category-level summaries
+  - Overspending indicators
+
+### Why DynamoDB?
+- Low-latency reads
+- Scalable for real-time applications
+- Avoids repeated heavy queries on transactional data
+
+---
+
+## 🏗️ Data Warehouse (Hive on EMR)
+A star schema was implemented for analytics:
+
+### Fact Table:
+- `fact_transaction`
+
+### Dimension Tables:
+- `dim_customer`
+- `dim_account`
+- `dim_category`
+- `dim_date`
+
+### Key Features:
+- Partitioning by year and month
+- Efficient time-based queries
+- Denormalized analytics table:
+  - `customer_spend_analytics`
+
+---
+
+## 📈 Analytics Pipeline (Python + Hive)
+A Python-based analytics tool was developed to:
+
+- Query Hive using `pyhive`
+- Filter data by user-defined inputs (e.g., age range)
+- Compute:
+  - Total and average spending
+  - Category-level spending
+  - Demographic breakdowns
+
+### Outputs:
+- Text-based reports
+- Multi-panel visualization (PNG)
+  - Spending by category
+  - Spending by job, education, marital status
+  - Category distribution
+
+---
+
+## 🖥️ Front-End Application
+An interactive interface allows users to:
+
+- Input parameters (e.g., age range)
+- Trigger backend analytics on EMR
+- View generated visualizations
+
+The front end communicates with the EMR cluster, executes Python + Hive queries, and returns results dynamically.
+
+---
+
+## 🛠️ Tech Stack
+- Python (Pandas, PyHive)
+- MySQL (RDS)
+- Apache Hive (EMR)
+- Hadoop (HDFS)
+- AWS DynamoDB
+- AWS S3
+- Flask (lightweight front end)
+
+---
+
+## 🚀 Key Takeaways
+- Built a full data pipeline from raw data → analytics → visualization
+- Demonstrated understanding of:
+  - OLTP vs OLAP systems
+  - Star schema design
+  - Distributed data processing (Hive/EMR)
+  - NoSQL optimization for speed
+- Designed a system that balances performance, scalability, and usability
+
