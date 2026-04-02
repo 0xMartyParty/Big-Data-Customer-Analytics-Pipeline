@@ -1,0 +1,638 @@
+
+
+
+# This is text file that contains all of the shell comands ran on EMR shell that were used to complete part 3 and some of 4 for the project
+
+
+
+
+
+ssh -i /Users/maxmarte/Downloads/emr-lab-key.pem hadoop@10.99.17.21
+
+
+hdfs dfs -mkdir -p /user/hadoop/bank_staging
+
+#loading staging tables to hdfs from S3 where they have to already be located
+hdfs dfs -cp s3://jpmorgan2025/account_table.csv      /user/hadoop/bank_staging/
+hdfs dfs -cp s3://jpmorgan2025/customer_table.csv     /user/hadoop/bank_staging/
+hdfs dfs -cp s3://jpmorgan2025/loan_table.csv         /user/hadoop/bank_staging/
+hdfs dfs -cp s3://jpmorgan2025/transaction_table.csv  /user/hadoop/bank_staging/
+
+
+Hive
+
+CREATE DATABASE IF NOT EXISTS bank_dw;
+USE bank_dw;
+
+Create staging tables
+
+CREATE TABLE IF NOT EXISTS stg_customer (
+  customer_id         STRING,
+  age                 INT,
+  job                 STRING,
+  marital             STRING,
+  education           STRING,
+  demographic_balance DOUBLE,
+  housing_loan        INT,
+  personal_loan       INT,
+  cc_balance          DOUBLE,
+  credit_limit        DOUBLE,
+  purchases           DOUBLE,
+  payments            DOUBLE
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ";",
+  "quoteChar"     = "\""
+)
+STORED AS TEXTFILE;
+
+LOAD DATA INPATH '/user/hadoop/bank_staging/customer_table.csv'
+INTO TABLE stg_customer;
+
+CREATE TABLE IF NOT EXISTS stg_account (
+  account_id   STRING,
+  customer_id  STRING,
+  account_type STRING,
+  open_date    STRING
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ";",
+  "quoteChar"     = "\""
+)
+STORED AS TEXTFILE;
+
+LOAD DATA INPATH '/user/hadoop/bank_staging/account_table.csv'
+INTO TABLE stg_account;
+
+CREATE TABLE IF NOT EXISTS stg_loan (
+  loan_id     STRING,
+  customer_id STRING,
+  loan_type   STRING,
+  loan_amount DOUBLE,
+  start_date  STRING,
+  status      STRING
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ";",
+  "quoteChar"     = "\""
+)
+STORED AS TEXTFILE;
+
+LOAD DATA INPATH '/user/hadoop/bank_staging/loan_table.csv'
+INTO TABLE stg_loan;
+
+CREATE TABLE IF NOT EXISTS stg_transaction (
+  transaction_id INT,
+  customer_id    STRING,
+  account_id     STRING,
+  transaction_ts STRING,
+  amount         DOUBLE,
+  category       STRING,
+  is_fraud       INT
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ";",
+  "quoteChar"     = "\""
+)
+STORED AS TEXTFILE;
+
+LOAD DATA INPATH '/user/hadoop/bank_staging/transaction_table.csv'
+INTO TABLE stg_transaction;
+
+#ETL Extract + Load into staging is done
+
+
+#Now onto the transform part
+
+CREATE TABLE IF NOT EXISTS dim_customer (
+  customer_id         STRING,
+  age                 INT,
+  job                 STRING,
+  marital             STRING,
+  education           STRING,
+  demographic_balance DOUBLE,
+  housing_loan        INT,
+  personal_loan       INT,
+  cc_balance          DOUBLE,
+  credit_limit        DOUBLE,
+  purchases           DOUBLE,
+  payments            DOUBLE
+)
+STORED AS TEXTFILE;
+
+INSERT OVERWRITE TABLE dim_customer
+SELECT
+  customer_id,
+  age,
+  job,
+  marital,
+  education,
+  demographic_balance,
+  housing_loan,
+  personal_loan,
+  cc_balance,
+  credit_limit,
+  purchases,
+  payments
+FROM stg_customer;
+
+
+
+CREATE TABLE IF NOT EXISTS dim_account (
+  account_id   STRING,
+  customer_id  STRING,
+  account_type STRING,
+  open_date    STRING      -- keep as string for simplicity
+)
+STORED AS TEXTFILE;
+
+INSERT OVERWRITE TABLE dim_account
+SELECT
+  account_id,
+  customer_id,
+  account_type,
+  open_date
+FROM stg_account;
+
+
+
+
+
+
+CREATE TABLE IF NOT EXISTS dim_category (
+  category STRING
+)
+STORED AS TEXTFILE;
+
+INSERT OVERWRITE TABLE dim_category
+SELECT DISTINCT category
+FROM stg_transaction;
+
+
+
+
+
+CREATE TABLE IF NOT EXISTS dim_date (
+  date_id STRING,   -- 'yyyy-MM-dd'
+  year    INT,
+  month   INT,
+  day     INT
+)
+STORED AS TEXTFILE;
+
+INSERT OVERWRITE TABLE dim_date
+SELECT
+  date_format(parsed_ts, 'yyyy-MM-dd') AS date_id,
+  year(parsed_ts)                       AS year,
+  month(parsed_ts)                      AS month,
+  day(parsed_ts)                        AS day
+FROM (
+  SELECT
+    from_unixtime(
+      unix_timestamp(transaction_ts,'yyyy-MM-dd HH:mm:ss')
+    ) AS parsed_ts
+  FROM stg_transaction
+) t
+GROUP BY
+  date_format(parsed_ts, 'yyyy-MM-dd'),
+  year(parsed_ts),
+  month(parsed_ts),
+  day(parsed_ts);
+
+
+
+SET hive.exec.dynamic.partition = true;
+SET hive.exec.dynamic.partition.mode = nonstrict;
+
+INSERT OVERWRITE TABLE fact_transaction
+PARTITION (year, month)
+SELECT
+  t.transaction_id,
+  t.customer_id,
+  t.account_id,
+  date_format(parsed_ts, 'yyyy-MM-dd') AS date_id,
+  t.amount,
+  t.category,
+  t.is_fraud,
+  year(parsed_ts)                      AS year,
+  month(parsed_ts)                     AS month
+FROM (
+  SELECT
+    transaction_id,
+    customer_id,
+    account_id,
+    from_unixtime(
+      unix_timestamp(transaction_ts,'yyyy-MM-dd HH:mm:ss')
+    ) AS parsed_ts,
+    amount,
+    category,
+    is_fraud
+  FROM stg_transaction
+) t;
+
+#Make big table for queries
+
+USE bank_dw;
+
+CREATE TABLE customer_spend_analytics AS
+SELECT
+    ft.customer_id,
+    dc.age,
+    dc.job,
+    dc.marital,
+    dc.education,
+    ft.category,
+    dd.year,
+    dd.month,
+    ft.amount
+FROM fact_transaction ft
+JOIN dim_customer dc 
+    ON ft.customer_id = dc.customer_id
+JOIN dim_date dd
+    ON ft.date_id = dd.date_id;
+
+
+#This is the python file that is written out to hive that the front end will call when a user inputs an age range. It will query based on that age range
+# and with the results of those queries will create visualizations in python and then put on the front end
+
+
+nano spending_analyzer_2.py
+
+#!/usr/bin/env python3
+"""
+Customer Spending Behavior Analyzer (No Date Filter)
+Pretty visuals, NO Monthly Spending Trend subplot.
+
+Generates ONE PNG:
+    /home/hadoop/spending_analysis_<min_age>_<max_age>.png
+
+Panels:
+  [1] Total Spending by Purchase Type
+  [2] Average Spending by Job Type (Top 10)
+  [3] Average Spending by Education Level
+  [4] Average Spending by Marital Status
+  [5] Transaction Distribution by Category (pie)
+
+Monthly spending trend is still computed for the text report, but not plotted.
+"""
+
+from pyhive import hive
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.ticker import FuncFormatter
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class SpendingAnalyzer:
+    def __init__(self, host='localhost', port=10000, database='default'):
+        self.host = host
+        self.port = port
+        self.database = database
+        self.connection = None
+
+    def connect(self):
+        """Establish connection to Hive"""
+        try:
+            self.connection = hive.Connection(
+                host=self.host,
+                port=self.port,
+                database=self.database,
+                auth='NONE'
+            )
+            print("✓ Connected to Hive successfully")
+            return True
+        except Exception as e:
+            print(f"✗ Connection failed: {e}")
+            return False
+
+    def get_age_range_data(self, min_age, max_age):
+        """Retrieve ALL spending data for age range (no date filter)."""
+        query = f"""
+        SELECT 
+            customer_id,
+            age,
+            job,
+            marital,
+            education,
+            category,
+            year,
+            month,
+            amount
+        FROM customer_spend_analytics
+        WHERE age BETWEEN {min_age} AND {max_age}
+        ORDER BY year, month
+        """
+
+        print(f"\n🔍 Querying Hive for data...")
+        print(f"   Age range: {min_age}-{max_age}")
+
+        try:
+            df = pd.read_sql(query, self.connection)
+            if len(df) > 0:
+                years = df['year'].unique()
+                print(f"✓ Retrieved {len(df)} transactions "
+                      f"from {df['customer_id'].nunique()} unique customers")
+                print(f"   Data spans: {years.min()}-{years.max()}")
+            return df
+        except Exception as e:
+            print(f"✗ Query failed: {e}")
+            return None
+
+    def analyze_spending_behavior(self, df):
+        """Compute summary tables used for visuals + report."""
+        print("\n📊 Analyzing spending behavior...")
+
+        analysis = {}
+
+        # Category analysis
+        analysis['avg_by_category'] = df.groupby('category')['amount'].agg(
+            ['mean', 'median', 'sum', 'count']
+        )
+        analysis['avg_by_category'].columns = ['Average', 'Median', 'Total', 'Count']
+
+        # Job type
+        analysis['avg_by_job'] = df.groupby('job')['amount'].agg(
+            ['mean', 'median', 'sum', 'count']
+        )
+        analysis['avg_by_job'].columns = ['Average', 'Median', 'Total', 'Count']
+        analysis['avg_by_job'] = analysis['avg_by_job'].sort_values('Average', ascending=False)
+
+        # Education level
+        analysis['avg_by_education'] = df.groupby('education')['amount'].agg(
+            ['mean', 'median', 'sum', 'count']
+        )
+        analysis['avg_by_education'].columns = ['Average', 'Median', 'Total', 'Count']
+        analysis['avg_by_education'] = analysis['avg_by_education'].sort_values('Average', ascending=False)
+
+        # Marital status
+        analysis['avg_by_marital'] = df.groupby('marital')['amount'].agg(
+            ['mean', 'median', 'sum', 'count']
+        )
+        analysis['avg_by_marital'].columns = ['Average', 'Median', 'Total', 'Count']
+
+        # Monthly trend (for text only)
+        df['year_month'] = df['year'].astype(str) + '-' + df['month'].astype(str).str.zfill(2)
+        analysis['monthly_trend'] = df.groupby('year_month')['amount'].agg(
+            ['sum', 'mean', 'count']
+        )
+        analysis['monthly_trend'].columns = ['Total', 'Average', 'Transaction_Count']
+
+        # Category trend over time (for possible future use)
+        analysis['category_trend'] = df.groupby(['year_month', 'category'])['amount'] \
+                                       .sum().unstack(fill_value=0)
+
+        # Overall stats
+        analysis['overall_stats'] = {
+            'total_spending': df['amount'].sum(),
+            'avg_transaction': df['amount'].mean(),
+            'median_transaction': df['amount'].median(),
+            'total_transactions': len(df),
+            'unique_customers': df['customer_id'].nunique(),
+            'avg_spending_per_customer': df.groupby('customer_id')['amount'].sum().mean()
+        }
+
+        print("✓ Analysis complete")
+        return analysis
+
+    def generate_text_report(self, age_range, analysis):
+        """Print the text report to stdout."""
+        min_age, max_age = age_range
+
+        print("\n" + "="*80)
+        print("CUSTOMER SPENDING BEHAVIOR ANALYSIS REPORT")
+        print(f"Age Range: {min_age}-{max_age} years old")
+        print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*80)
+
+        stats = analysis['overall_stats']
+        print("\n📈 OVERALL STATISTICS")
+        print("-" * 80)
+        print(f"Total Spending:              ${stats['total_spending']:,.2f}")
+        print(f"Average Transaction:         ${stats['avg_transaction']:,.2f}")
+        print(f"Median Transaction:          ${stats['median_transaction']:,.2f}")
+        print(f"Total Transactions:          {stats['total_transactions']:,}")
+        print(f"Unique Customers:            {stats['unique_customers']:,}")
+        print(f"Avg Spending per Customer:   ${stats['avg_spending_per_customer']:,.2f}")
+
+        print("\n💳 SPENDING BY PURCHASE TYPE")
+        print("-" * 80)
+        print(analysis['avg_by_category'].to_string())
+
+        print("\n👔 SPENDING BY JOB TYPE (Top 10)")
+        print("-" * 80)
+        print(analysis['avg_by_job'].head(10).to_string())
+
+        print("\n🎓 SPENDING BY EDUCATION LEVEL")
+        print("-" * 80)
+        print(analysis['avg_by_education'].to_string())
+
+        print("\n💑 SPENDING BY MARITAL STATUS")
+        print("-" * 80)
+        print(analysis['avg_by_marital'].to_string())
+
+        print("\n📅 MONTHLY SPENDING TREND")
+        print("-" * 80)
+        print(analysis['monthly_trend'].to_string())
+
+        print("\n💡 KEY INSIGHTS")
+        print("-" * 80)
+
+        highest_category = analysis['avg_by_category']['Total'].idxmax()
+        highest_amount = analysis['avg_by_category']['Total'].max()
+        print(f"• Highest total spending category: {highest_category} "
+              f"(${highest_amount:,.2f})")
+
+        most_common = analysis['avg_by_category']['Count'].idxmax()
+        most_common_count = analysis['avg_by_category']['Count'].max()
+        print(f"• Most common purchase type: {most_common} "
+              f"({most_common_count:,} transactions)")
+
+        top_job = analysis['avg_by_job'].index[0]
+        top_job_avg = analysis['avg_by_job']['Average'].iloc[0]
+        print(f"• Highest average spending job: {top_job} "
+              f"(${top_job_avg:,.2f} per transaction)")
+
+        trend_data = analysis['monthly_trend']['Total']
+        if len(trend_data) >= 6:
+            recent_avg = trend_data.tail(3).mean()
+            early_avg = trend_data.head(3).mean()
+            change_pct = ((recent_avg - early_avg) / early_avg) * 100
+            trend_direction = "increased" if change_pct > 0 else "decreased"
+            print(
+                f"• Spending trend: {trend_direction} by {abs(change_pct):.1f}% "
+                f"(comparing recent vs earlier months)"
+            )
+
+        print("\n" + "="*80)
+
+    def create_visualizations(self, age_range, analysis, output_dir='/home/hadoop/'):
+        """
+        Create and save ONE summary PNG.
+        NO Monthly Spending Trend subplot.
+        """
+        print("\n📊 Creating summary visualization (no monthly subplot)...")
+
+        min_age, max_age = age_range
+        sns.set_style("whitegrid")
+
+        money_fmt = FuncFormatter(lambda x, pos: f"${x:,.0f}")
+
+        fig = plt.figure(figsize=(20, 10))
+
+        # 1. Total Spending by Purchase Type
+        ax1 = plt.subplot(2, 3, 1)
+        category_data = analysis['avg_by_category']['Total'].sort_values(ascending=True)
+        category_data.plot(kind='barh', ax=ax1, color='steelblue')
+        ax1.set_title('Total Spending by Purchase Type', fontsize=14, fontweight='bold')
+        ax1.set_xlabel('Total Amount ($)')
+        ax1.set_ylabel('Purchase Type')
+        ax1.xaxis.set_major_formatter(money_fmt)
+
+        # 2. Average Spending by Job Type (Top 10)
+        ax2 = plt.subplot(2, 3, 2)
+        job_data = analysis['avg_by_job']['Average'].head(10).sort_values(ascending=True)
+        job_data.plot(kind='barh', ax=ax2, color='coral')
+        ax2.set_title('Average Spending by Job Type (Top 10)', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Average Amount ($)')
+        ax2.set_ylabel('Job Type')
+        ax2.xaxis.set_major_formatter(money_fmt)
+
+        # 3. Average Spending by Education Level
+        ax3 = plt.subplot(2, 3, 3)
+        edu_data = analysis['avg_by_education']['Average'].sort_values(ascending=True)
+        edu_data.plot(kind='barh', ax=ax3, color='purple')
+        ax3.set_title('Average Spending by Education Level', fontsize=14, fontweight='bold')
+        ax3.set_xlabel('Average Amount ($)')
+        ax3.set_ylabel('Education Level')
+        ax3.xaxis.set_major_formatter(money_fmt)
+
+        # 4. Average Spending by Marital Status
+        ax4 = plt.subplot(2, 3, 4)
+        marital_data = analysis['avg_by_marital']['Average'].sort_values(ascending=True)
+        marital_data.plot(kind='barh', ax=ax4, color='teal')
+        ax4.set_title('Average Spending by Marital Status', fontsize=14, fontweight='bold')
+        ax4.set_xlabel('Average Amount ($)')
+        ax4.set_ylabel('Marital Status')
+        ax4.xaxis.set_major_formatter(money_fmt)
+
+        # 5. Transaction Distribution by Category (Pie)
+        ax5 = plt.subplot(2, 3, 5)
+        category_counts = analysis['avg_by_category']['Count']
+        colors = plt.cm.Set3(range(len(category_counts)))
+        ax5.pie(
+            category_counts,
+            labels=category_counts.index,
+            autopct='%1.1f%%',
+            startangle=90,
+            colors=colors,
+        )
+        ax5.set_title('Transaction Distribution by Category', fontsize=14, fontweight='bold')
+
+        plt.suptitle(
+            f'Customer Spending Analysis: Ages {min_age}-{max_age}',
+            fontsize=16,
+            fontweight='bold',
+            y=0.995,
+        )
+        plt.tight_layout()
+
+        filename = f'{output_dir}spending_analysis_{min_age}_{max_age}.png'
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        print(f"✓ Saved visualization: {filename}")
+
+    def close(self):
+        if self.connection:
+            try:
+                self.connection.close()
+                print("\n✓ Connection closed")
+            except Exception:
+                pass
+
+
+def main():
+    """Interactive CLI entrypoint."""
+    print("="*80)
+    print("CUSTOMER SPENDING BEHAVIOR ANALYZER (NO MONTHLY SUBPLOT)")
+    print("="*80)
+
+    print("\nEnter the age range you want to analyze:")
+    try:
+        min_age = int(input("  Minimum age: "))
+        max_age = int(input("  Maximum age: "))
+
+        if min_age < 0 or max_age < 0 or min_age > max_age:
+            print("✗ Invalid age range. Please ensure min_age <= max_age and both are positive.")
+            return
+
+        database = "bank_dw"
+        print(f"\n📊 Using database: {database}")
+
+    except ValueError:
+        print("✗ Invalid input. Please enter numeric values for ages.")
+        return
+
+    analyzer = SpendingAnalyzer(host='localhost', port=10000, database=database)
+
+    if not analyzer.connect():
+        return
+
+    try:
+        df = analyzer.get_age_range_data(min_age, max_age)
+
+        if df is None or len(df) == 0:
+            print("✗ No data found for the specified age range.")
+            analyzer.close()
+            return
+
+        analysis = analyzer.analyze_spending_behavior(df)
+
+        # Print report once to screen
+        analyzer.generate_text_report((min_age, max_age), analysis)
+
+        # Save visuals
+        analyzer.create_visualizations((min_age, max_age), analysis)
+
+        # Save report to text file as well
+        import sys
+        from io import StringIO
+
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        analyzer.generate_text_report((min_age, max_age), analysis)
+        report_text = sys.stdout.getvalue()
+        sys.stdout = old_stdout
+
+        report_path = f"/home/hadoop/spending_report_{min_age}_{max_age}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(report_path, "w") as f:
+            f.write(report_text)
+        print(f"\n✓ Report saved to: {report_path}")
+
+    except Exception as e:
+        print(f"\n✗ An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        analyzer.close()
+        print("\n" + "="*80)
+        print("Analysis complete.")
+        print("="*80)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
